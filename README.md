@@ -12,3 +12,6 @@ Setting a password is as easy as 123.
 2: click settings (inside that menu) 
 3: type it in and click ok.
 uhhhhh. A lot of things dont work, AND i leave you there. Dont do anything stupid kiddo! 
+
+
+NOTE: Firewall is NOT required but it IS recommended for the most non garbage experience.
