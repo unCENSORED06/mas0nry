@@ -1,24 +1,22 @@
 import sys
-import threading
-import logging
-import hashlib
 import os
+import bcrypt  # Import bcrypt for password hashing
 from flask import Flask, request, Response
 import requests
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QLineEdit,
-                             QPushButton, QTabWidget, QAction, QMenuBar, QDialog, QFormLayout, QLabel, QMessageBox)
-from PyQt5.QtCore import QUrl
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QLineEdit, QPushButton, QTabWidget, QDialog, QFormLayout, QLabel, QMessageBox, QMenuBar, QMenu, QToolBar
+from PyQt6.QtGui import QPixmap, QAction
+from PyQt6.QtCore import QUrl, QThread
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 from urllib.parse import quote, unquote
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
+from PyQt6.QtMultimedia import QSoundEffect  # Use QSoundEffect for audio
+import threading
 
 # Flask app for proxy server
 app = Flask(__name__)
 
 @app.after_request
 def add_cors_headers(response):
+    """Add CORS headers to allow cross-origin requests."""
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
@@ -27,161 +25,268 @@ def add_cors_headers(response):
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 def proxy(path):
+    """Proxy requests to external URLs."""
     url = request.args.get('url', path)
-    
+
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
-    
-    # Decode the URL to handle any encoded characters
+
     url = unquote(url)
 
-    logging.info(f"Proxying request to {url}")
-
-    headers = {key: value for key, value in request.headers if key.lower() != 'host'}
     try:
-        if request.method == 'GET':
-            response = requests.get(url, headers=headers, stream=True, verify=False)
-        elif request.method == 'POST':
-            response = requests.post(url, headers=headers, data=request.data, verify=False)
-        elif request.method == 'PUT':
-            response = requests.put(url, headers=headers, data=request.data, verify=False)
-        elif request.method == 'DELETE':
-            response = requests.delete(url, headers=headers, verify=False)
-        else:
-            return "Method Not Allowed", 405
-
-        content_type = response.headers.get('Content-Type', 'application/octet-stream')
-        proxy_response = Response(
-            response.content,
-            status=response.status_code,
-            headers={'Content-Type': content_type}
+        # Forward request
+        response = requests.request(
+            method=request.method,
+            url=url,
+            headers={key: value for key, value in request.headers.items() if key.lower() != 'host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            stream=True
         )
-        
-        for header, value in response.headers.items():
-            if header.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']:
-                proxy_response.headers[header] = value
-        
-        return proxy_response
-    except requests.RequestException as e:
-        logging.error(f"Request failed for {url}: {e}")
-        return str(e), 500
 
-# Utility functions for password hashing
+        # Filter and forward headers
+        excluded_headers = ['content-length', 'transfer-encoding', 'connection']
+        forwarded_headers = {
+            key: value for key, value in response.headers.items()
+            if key.lower() not in excluded_headers
+        }
+
+        # Return response with forwarded content and headers
+        proxy_response = Response(
+            response.iter_content(chunk_size=8192),
+            status=response.status_code,
+            headers=forwarded_headers,
+        )
+        proxy_response.headers['Content-Type'] = response.headers.get('Content-Type', 'application/octet-stream')
+        return proxy_response
+
+    except requests.RequestException as e:
+        return f"Error proxying the request: {e}", 500
+
+# Password hashing utilities with bcrypt
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Generate a bcrypt hash of the password."""
+    salt = bcrypt.gensalt()
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed_password.decode('utf-8')
 
 def save_password_hash(password_hash):
+    """Save the password hash to a file."""
     with open('password_hash.txt', 'w') as f:
         f.write(password_hash)
 
 def load_password_hash():
+    """Load the password hash from a file, or initialize it if it doesn't exist."""
     if os.path.exists('password_hash.txt'):
         with open('password_hash.txt', 'r') as f:
             return f.read().strip()
-    return None
+    else:
+        # If the file does not exist, initialize it with a default password hash
+        default_password = "defaultpassword"  # You can change this
+        hashed_password = hash_password(default_password)
+        save_password_hash(hashed_password)
+        return hashed_password
 
-# Global password hash variable
+# Function to verify password
+def verify_password(stored_hash, password):
+    """Verify the entered password against the stored hash."""
+    return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+
+# Global password hash
 password_hash = load_password_hash()
 
-# PyQt5 Browser Class
+# PyQt6 Web Browser
 class SimpleBrowser(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        # Ensure password is correct before starting the main app
+        if not self.ask_for_password():
+            sys.exit()  # Exit if the password is incorrect
+
         self.setWindowTitle('mas0nry')
         self.setGeometry(100, 100, 1200, 800)
+        self.dark_mode = False
 
+        # Layout for URL input and browser tabs
+        self.main_layout = QVBoxLayout()
+
+        # Browser Tab Setup
         self.browser_tabs = QTabWidget()
-        self.setCentralWidget(self.browser_tabs)
+        self.browser_tabs.setTabsClosable(True)
+        self.browser_tabs.tabCloseRequested.connect(self.close_tab)
+        self.main_layout.addWidget(self.browser_tabs)
 
-        self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText('Enter URL and press Enter...')
-        self.url_input.returnPressed.connect(self.load_url)
-
-        self.refresh_button = QPushButton('Refresh')
-        self.refresh_button.clicked.connect(self.refresh_current_tab)
-
-        self.loading_label = QLabel('Loading...')
-        self.loading_label.setStyleSheet("color: blue; font-size: 16px;")
-        self.loading_label.setVisible(False)
-
-        self.menu_bar = self.menuBar()
-        self.settings_menu = self.menu_bar.addMenu('Settings')
-
-        self.settings_action = QAction('Settings', self)
-        self.settings_action.triggered.connect(self.open_settings)
-        self.settings_menu.addAction(self.settings_action)
-
-        self.about_action = QAction('About', self)
-        self.about_action.triggered.connect(self.show_about_dialog)
-        self.settings_menu.addAction(self.about_action)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.url_input)
-        layout.addWidget(self.refresh_button)
-        layout.addWidget(self.loading_label)
-        layout.addWidget(self.browser_tabs)
-
+        # Set layout for the main window
         container = QWidget()
-        container.setLayout(layout)
+        container.setLayout(self.main_layout)
         self.setCentralWidget(container)
 
+        # Menu Bar
+        self.menu_bar = QMenuBar()
+        self.setMenuBar(self.menu_bar)
+
+        # Settings Menu
+        settings_menu = QMenu('Settings', self)
+        self.menu_bar.addMenu(settings_menu)
+
+        # Toggle Theme Action
+        toggle_theme_action = QAction('Toggle Theme', self)
+        toggle_theme_action.triggered.connect(self.toggle_theme)
+        settings_menu.addAction(toggle_theme_action)
+
+        # Change Password Action
+        change_password_action = QAction('Change Password', self)
+        change_password_action.triggered.connect(self.change_password)
+        settings_menu.addAction(change_password_action)
+
+        # About Action
+        about_action = QAction('About', self)
+        about_action.triggered.connect(self.show_about_dialog)
+        settings_menu.addAction(about_action)
+
+        # Add new tab button to toolbar
+        self.toolbar = QToolBar()
+        self.addToolBar(self.toolbar)
+        new_tab_action = QAction('New Tab', self)
+        new_tab_action.triggered.connect(self.add_new_tab)
+        self.toolbar.addAction(new_tab_action)
+
+        # Add initial tab
         self.add_new_tab()
 
-    def add_new_tab(self, url='https://www.google.com'):
+    def add_new_tab(self):
+        """Add a new browser tab."""
         browser = QWebEngineView()
-        browser.page().loadFinished.connect(self.on_load_finished)
+        browser.setUrl(QUrl('https://www.google.com'))  # Open Google by default
         self.browser_tabs.addTab(browser, 'New Tab')
         self.browser_tabs.setCurrentWidget(browser)
-        self.load_url_in_tab(browser, url)
+        browser.urlChanged.connect(self.update_tab_title)
+
+    def close_tab(self, index):
+        """Close the tab at the given index."""
+        if self.browser_tabs.count() > 1:
+            self.browser_tabs.removeTab(index)
+        else:
+            self.add_new_tab()  # Prevent closing the last tab
+
+    def update_tab_title(self, url):
+        """Update the tab title to reflect the page title."""
+        browser = self.browser_tabs.currentWidget()
+        if browser:
+            self.browser_tabs.setTabText(self.browser_tabs.indexOf(browser), browser.title())
 
     def load_url(self):
+        """Load the URL from the input field into the current tab."""
         url = self.url_input.text()
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         self.load_url_in_tab(self.browser_tabs.currentWidget(), url)
 
     def load_url_in_tab(self, browser, url):
+        """Load the URL into the specific tab."""
         encoded_url = quote(url, safe=':/?=&')
         proxy_url = f'http://localhost:5000/?url={encoded_url}'
-        logging.debug(f"Proxy URL: {proxy_url}")
-        self.loading_label.setVisible(True)
         browser.setUrl(QUrl(proxy_url))
 
-    def refresh_current_tab(self):
-        current_browser = self.browser_tabs.currentWidget()
-        if current_browser:
-            current_browser.reload()
+    def toggle_theme(self):
+        """Toggle between dark and light mode."""
+        self.dark_mode = not self.dark_mode
+        theme = """
+        QMainWindow {
+            background-color: #282C34;
+            color: white;
+        }
+        QTabWidget::pane {
+            border: 1px solid #444;
+        }
+        QTabBar::tab {
+            background: #444;
+            color: white;
+            padding: 5px;
+        }
+        QTabBar::tab:selected {
+            background: #282C34;
+        }
+        """ if self.dark_mode else """
+        QMainWindow {
+            background-color: white;
+            color: black;
+        }
+        QTabWidget::pane {
+            border: 1px solid #ddd;
+        }
+        QTabBar::tab {
+            background: #fff;
+            color: black;
+            padding: 5px;
+        }
+        QTabBar::tab:selected {
+            background: #f5f5f5;
+        }
+        """
+        self.setStyleSheet(theme)
 
-    def on_load_finished(self, ok):
-        if ok:
-            self.loading_label.setVisible(False)
-        else:
-            self.loading_label.setText('Failed to load page.')
-            self.loading_label.setVisible(True)
-
-    def open_settings(self):
+    def change_password(self):
+        """Open the Change Password dialog."""
         dialog = SettingsDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             global password_hash
             new_password = dialog.password_input.text()
             password_hash = hash_password(new_password)
             save_password_hash(password_hash)
-            logging.info("Password has been set.")
+            QMessageBox.information(self, 'Success', 'Password has been changed.')
 
     def show_about_dialog(self):
-        QMessageBox.information(self, 'About', 'mas0nry\nVersion 0.7.0\n\nUSE THIS AT YOUR OWN RISK! IF YOU GET IN TROUBLE I AM NOT RESPONSIBLE (don’t do illegal stuff basically)')
+        """Show the About dialog with an image and audio using QSoundEffect."""
+        about_dialog = QDialog(self)
+        about_dialog.setWindowTitle("About mas0nry")
+
+        layout = QVBoxLayout()
+
+        # Add image to the about dialog
+        image_label = QLabel()
+        pixmap = QPixmap("mas0nry.png")  # Provide the correct path to your image file
+        image_label.setPixmap(pixmap)
+        layout.addWidget(image_label)
+
+        # Add description
+        description_label = QLabel('mas0nry\nVersion 0.8.0 "Red Dwarf"\nUSE THIS AT YOUR OWN RISK!')
+        layout.addWidget(description_label)
+
+        # Play sound using QSoundEffect
+        sound = QSoundEffect()
+        sound.setSource(QUrl.fromLocalFile('about.wav'))  # Path to your WAV file
+        sound.setVolume(1.0)  # Set volume (0.0 to 1.0)
+        sound.play()  # Play the sound effect
+
+        about_dialog.setLayout(layout)
+        about_dialog.exec()
+
+    def ask_for_password(self):
+        """Ask user for password before proceeding."""
+        password_dialog = PasswordDialog(self)
+        if password_dialog.exec() == QDialog.DialogCode.Accepted:
+            entered_password = password_dialog.password_input.text()
+            if verify_password(password_hash, entered_password):
+                return True
+            else:
+                QMessageBox.warning(self, 'Incorrect Password', 'The password you entered is incorrect.')
+                return False
+        return False
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.setWindowTitle('Settings')
+        self.setWindowTitle('Change Password')
+        self.setGeometry(400, 300, 300, 150)
 
         self.form_layout = QFormLayout()
         self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.Password)
-        self.form_layout.addRow(QLabel('Set Password:'), self.password_input)
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.form_layout.addRow('New Password:', self.password_input)
 
         self.save_button = QPushButton('Save')
         self.save_button.clicked.connect(self.accept)
@@ -189,50 +294,35 @@ class SettingsDialog(QDialog):
 
         self.setLayout(self.form_layout)
 
-class LoginDialog(QDialog):
+class PasswordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-
-        self.setWindowTitle('Login')
+        self.setWindowTitle('Password Required')
+        self.setGeometry(400, 300, 300, 150)
 
         self.form_layout = QFormLayout()
         self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.Password)
-        self.form_layout.addRow(QLabel('Enter Password:'), self.password_input)
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.form_layout.addRow('Enter Password:', self.password_input)
 
-        self.login_button = QPushButton('Login')
-        self.login_button.clicked.connect(self.check_password)
-        self.form_layout.addWidget(self.login_button)
+        self.save_button = QPushButton('OK')
+        self.save_button.clicked.connect(self.accept)
+        self.form_layout.addWidget(self.save_button)
 
         self.setLayout(self.form_layout)
 
-    def check_password(self):
-        global password_hash
-        entered_password = self.password_input.text()
-        if password_hash is None:
-            self.accept()
-        elif hash_password(entered_password) == password_hash:
-            self.accept()
-        else:
-            self.password_input.clear()
-            self.password_input.setPlaceholderText('Incorrect Password')
-
-def run_flask():
-    app.run(host='0.0.0.0', port=5000)
+# Run Flask and PyQt6
+def start_flask():
+    app.run(debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    flask_thread = threading.Thread(target=run_flask)
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=start_flask)
     flask_thread.daemon = True
     flask_thread.start()
 
-    qt_app = QApplication(sys.argv)
-
-    while True:
-        login_dialog = LoginDialog()
-        if login_dialog.exec_() == QDialog.Accepted:
-            window = SimpleBrowser()
-            window.show()
-            sys.exit(qt_app.exec_())
-            break
-        else:
-            QMessageBox.warning(None, 'Access Denied', 'Incorrect password. Please try again.')
+    # Start PyQt6 application
+    app = QApplication(sys.argv)
+    window = SimpleBrowser()
+    window.show()
+    sys.exit(app.exec())
